@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+# The call transcripts are for this task only and are not to be published. Keep them out of the repo.
+transcripts/
+*.zip
+data/
