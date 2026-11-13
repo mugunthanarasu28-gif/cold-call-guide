@@ -68,29 +68,98 @@ SYSTEM = (
     '"next_call_note": under 25 words on how to open the next call, built from the prospect\'s own words, or "" if there are none}'
 )
 
+GROQ = "https://api.groq.com/openai/v1"
+# Groq retires and adds models often (llama-3.3-70b-versatile is gone from the list as of Nov 2026).
+# The first live one of these is used when the configured model fails. Set LLM_MODEL to pin one.
+PREFERRED = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+]
+
+
+def _reason(e: Exception) -> str:
+    """Say what actually went wrong, so the screen can show it instead of a class name."""
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        try:
+            msg = e.response.json()["error"]["message"]
+        except Exception:
+            msg = e.response.text[:160]
+        hint = {
+            401: " The key was refused. Create a new key in the Groq console and paste it again with no spaces or quotes.",
+            429: " Rate limit. Try again in a minute.",
+        }.get(code, "")
+        return f"Groq answered {code}: {msg}{hint}"[:300]
+    if isinstance(e, (ValueError, KeyError, IndexError)):
+        return "The model answered in a format the app could not read."
+    return f"The model could not be reached ({type(e).__name__})."
+
+
+def _parse(content) -> dict:
+    """The reply should be one JSON object. Take the first {...} in case the model added words around it."""
+    if not content:
+        raise ValueError("empty reply")
+    start, end = content.find("{"), content.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON in reply")
+    return json.loads(content[start:end + 1])
+
+
+def _chat(key: str, model: str, call: dict, stages: list[dict]) -> dict:
+    body = {
+        "model": model,
+        "temperature": 0.2,
+        "max_tokens": 1500,  # room for the model's own reasoning as well as the short JSON answer
+        "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": _evidence(call, stages)}],
+    }
+    if model.startswith("openai/gpt-oss"):
+        body["reasoning_effort"] = "low"      # a quick check does not need long reasoning
+        body["include_reasoning"] = False
+    else:
+        body["response_format"] = {"type": "json_object"}
+    r = httpx.post(f"{GROQ}/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body, timeout=20)
+    r.raise_for_status()
+    return _parse(r.json()["choices"][0]["message"]["content"])
+
+
+def _live_models(key: str, skip: str) -> list[str]:
+    r = httpx.get(f"{GROQ}/models", headers={"Authorization": f"Bearer {key}"}, timeout=8)
+    r.raise_for_status()
+    live = {m["id"] for m in r.json().get("data", [])}
+    return [m for m in PREFERRED if m in live and m != skip]
+
 
 def llm_review(call: dict, stages: list[dict]) -> dict:
-    key = os.getenv("GROQ_API_KEY")
+    key = (os.getenv("GROQ_API_KEY") or "").strip().strip("\"'")
     if not key:
         return {"available": False, "reason": "No LLM key is set on the server."}
-    model = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-    try:
-        r = httpx.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": model,
-                "temperature": 0.2,
-                "max_tokens": 350,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": _evidence(call, stages)}],
-            },
-            timeout=12,
-        )
-        r.raise_for_status()
-        data = json.loads(r.json()["choices"][0]["message"]["content"])
-    except (httpx.HTTPError, KeyError, ValueError, IndexError) as e:
-        return {"available": False, "reason": f"The model could not be reached ({type(e).__name__})."}
+    first = (os.getenv("LLM_MODEL") or PREFERRED[0]).strip()
+    queue, looked, model, data, last = [first], False, first, None, None
+    while queue and data is None:
+        model = queue.pop(0)
+        try:
+            data = _chat(key, model, call, stages)
+            break
+        except httpx.HTTPStatusError as e:
+            last = e
+            if e.response.status_code not in (400, 404):   # 401, 429, 5xx: another model will not help
+                break
+        except (KeyError, ValueError, IndexError) as e:     # unreadable reply: another model might do better
+            last = e
+        except httpx.HTTPError as e:                        # network trouble
+            last = e
+            break
+        if not looked:                                      # the model may be retired: ask Groq what is live
+            looked = True
+            try:
+                queue = _live_models(key, skip=first)[:2]
+            except httpx.HTTPError as e:
+                last = e
+    if data is None:
+        return {"available": False, "reason": _reason(last)}
     suggested = data.get("suggested_outcome")
     if suggested not in OUTCOMES:
         suggested = call.get("outcome")
