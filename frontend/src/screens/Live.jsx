@@ -78,9 +78,10 @@ export default function Live({ id }) {
   const stage = STAGES[call.stage - 1];
   const here = call.results[call.stage] || { taps: [], words: "" };
   const next = STAGES[call.stage];
+  const over = CALL_LENGTH.of - CALL_LENGTH.shorterThan120;
   const pace = elapsed < 120
-    ? `${CALL_LENGTH.shorterThan120} of ${CALL_LENGTH.of} calls in the transcripts ended before 2:00.`
-    : `Past 2:00. Only ${CALL_LENGTH.of - CALL_LENGTH.shorterThan120} of ${CALL_LENGTH.of} calls in the transcripts ran this long.`;
+    ? `${CALL_LENGTH.shorterThan120} of ${CALL_LENGTH.of} calls in the transcripts ended before 2:00, and ${CALL_LENGTH.positiveUnder120} of those ended well (report agreed, next step or interest).`
+    : `Past 2:00. ${over} of ${CALL_LENGTH.of} calls ran this long, and ${CALL_LENGTH.positiveOver120} of them ended well. Do not rush a call that is going well.`;
 
   const railNote = (n) => {
     const r = call.results[n];
@@ -130,6 +131,15 @@ export default function Live({ id }) {
         <ul className="says">
           {stage.says.map((q) => <li key={q}>{q.startsWith("(") ? q : `\u201C${q}\u201D`}</li>)}
         </ul>
+        {stage.seen && (
+          <details className="seen">
+            <summary>What the 100 calls show here</summary>
+            <p>
+              {stage.seen}
+              {stage.evidence?.length > 0 && <span className="seen-ids"> Calls to read: {stage.evidence.slice(0, 5).join(", ")}.</span>}
+            </p>
+          </details>
+        )}
 
         <h2>What happened</h2>
         <div className="taps">
